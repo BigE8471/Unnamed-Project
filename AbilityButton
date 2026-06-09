@@ -1,0 +1,88 @@
+using UnityEngine;
+using UnityEngine.UI;
+using TMPro; // only needed if you use cooldownText
+
+public class AbilityButtonUI : MonoBehaviour
+{
+    [Header("UI")]
+    public Image cooldownFill;            // Image set to Type=Filled
+    public TMP_Text cooldownText;         // (optional) countdown
+    public Button button;                 // (optional) auto-grab if left null
+
+    [Header("Source")]
+    public PlayerAbility ability;         // leave null to auto-find the player's ability
+    public bool autoFindFromPlayer = true;
+    public bool invertFill = false;       // true = empty while cooling; false = fills while cooling
+
+    void Awake()
+    {
+        if (!button) button = GetComponent<Button>();
+        if (button) button.onClick.AddListener(OnButtonPress);
+
+        if (cooldownFill && cooldownFill.type != Image.Type.Filled)
+            cooldownFill.type = Image.Type.Filled;
+    }
+
+    void Start()
+    {
+        TryAutoFind();
+        ImmediateRefresh();
+    }
+
+    void Update()
+    {
+        if (!ability)
+        {
+            TryAutoFind();
+            if (!ability)
+            {
+                if (button) button.interactable = false;
+                if (cooldownFill) cooldownFill.fillAmount = 0f;
+                if (cooldownText) cooldownText.text = "";
+                return;
+            }
+        }
+
+        // Enable button only when we have an ability equipped and not on cooldown
+        bool hasAbility = ability.equippedAbility != null;
+        bool onCd = ability.IsOnCooldown;
+        if (button) button.interactable = hasAbility && !onCd;
+
+        // Your CooldownPercent() returns remaining/total (0 = ready, 1 = full cooldown)
+        float pct = hasAbility ? ability.CooldownPercent() : 0f;
+        if (cooldownFill) cooldownFill.fillAmount = invertFill ? 1f - pct : pct;
+
+        if (cooldownText)
+        {
+            float remain = hasAbility ? ability.CooldownRemaining() : 0f;
+            cooldownText.text = (!hasAbility || remain <= 0.01f) ? "" : Mathf.CeilToInt(remain).ToString();
+        }
+    }
+
+    public void OnButtonPress()
+    {
+        ability?.TryUseAbility();
+    }
+
+    void TryAutoFind()
+    {
+        if (!autoFindFromPlayer || ability) return;
+
+        // Prefer your PlayerManager
+        if (PlayerManager.Instance && PlayerManager.Instance.player)
+        {
+            ability = PlayerManager.Instance.player.GetComponentInChildren<PlayerAbility>();
+            if (ability) return;
+        }
+
+        // Fallback: first in scene
+        ability = Object.FindFirstObjectByType<PlayerAbility>();
+    }
+
+    void ImmediateRefresh()
+    {
+        if (!cooldownFill) return;
+        float pct = ability ? ability.CooldownPercent() : 0f;
+        cooldownFill.fillAmount = invertFill ? 1f - pct : pct;
+    }
+}
