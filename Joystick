@@ -1,0 +1,30 @@
+using UnityEngine;
+using UnityEngine.EventSystems;
+
+public class MobileJoystick : MonoBehaviour, IPointerDownHandler, IPointerUpHandler, IDragHandler
+{
+    [SerializeField] private RectTransform handle;
+    [SerializeField, Range(0.1f, 2f)] private float handleRange = 1f;
+    [SerializeField] private float deadZone = 0.1f;
+
+    RectTransform baseRect; Canvas canvas; Camera uiCam;
+    Vector2 input; public Vector2 Direction => input.magnitude < deadZone ? Vector2.zero : input.normalized;
+
+    void Awake() {
+        baseRect = GetComponent<RectTransform>();
+        canvas = GetComponentInParent<Canvas>();
+        uiCam = canvas && canvas.renderMode != RenderMode.ScreenSpaceOverlay ? canvas.worldCamera : null;
+        if (!handle) handle = transform.GetChild(0) as RectTransform;
+        if (handle) handle.anchoredPosition = Vector2.zero;
+    }
+    public void OnPointerDown(PointerEventData e) => OnDrag(e);
+    public void OnPointerUp  (PointerEventData e) { input = Vector2.zero; if (handle) handle.anchoredPosition = Vector2.zero; }
+    public void OnDrag       (PointerEventData e)
+    {
+        if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(baseRect, e.position, uiCam, out var pos)) return;
+        var r = baseRect.sizeDelta * 0.5f;
+        var delta = new Vector2(pos.x / r.x, pos.y / r.y);
+        input = Vector2.ClampMagnitude(delta, 1f);
+        if (handle) handle.anchoredPosition = input * r * handleRange;
+    }
+}
