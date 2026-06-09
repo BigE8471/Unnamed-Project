@@ -1,0 +1,253 @@
+using UnityEngine;
+
+[DisallowMultipleComponent]
+[RequireComponent(typeof(Rigidbody))]
+[RequireComponent(typeof(BuffManager))]
+public class PlayerController : MonoBehaviour
+{
+    public static PlayerController Instance { get; private set; }
+
+    [Header("Movement")]
+    public float moveSpeed = 5f;
+    public Rigidbody rb;
+
+    [Tooltip("Optional: assign your on-screen joystick for mobile")]
+    [SerializeField] private MobileJoystick moveJoystick;
+#if UNITY_EDITOR
+    [SerializeField] private bool keyboardFallbackInEditor = true;
+#endif
+
+    [Header("Auto-Attack")]
+    public GameObject projectilePrefab;
+    public Transform firePoint;
+    public float fireRate = 1f;
+    [SerializeField] public float projectileSpeed = 10f;
+
+    [Tooltip("Only consider enemies within this distance. Raise it to match your game.")]
+    [SerializeField] private float attackRange = 12f;
+
+    [Header("Rotation")]
+    [SerializeField] private float rotateSpeed = 720f; // deg/sec toward target or move dir
+
+    [Header("Projectile Spawn Safety")]
+    public float spawnHeight = 1.2f;
+    public float muzzleOffset = 0.5f;
+    public string projectileLayerName = "PlayerProjectile";
+
+    private float nextFireTime;
+    private Vector3 lastMoveDir = Vector3.zero;
+    private BuffManager buffManager;
+
+    // ===== Projectile Tracking =====
+    private Projectile lastProjectile;
+    public Projectile GetLastFiredProjectile() => lastProjectile;
+    public void RegisterFiredProjectile(Projectile proj)
+    {
+        if (proj != null)
+            lastProjectile = proj;
+    }
+
+    void Awake()
+    {
+        if (Instance != null && Instance != this)
+        {
+            Destroy(gameObject);
+            return;
+        }
+        Instance = this;
+
+        if (!rb) rb = GetComponent<Rigidbody>();
+        rb.interpolation = RigidbodyInterpolation.Interpolate;
+        rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+        rb.constraints = RigidbodyConstraints.FreezeRotationX | RigidbodyConstraints.FreezeRotationZ;
+
+        buffManager = GetComponent<BuffManager>();
+    }
+
+    void Update()
+    {
+        float modifiedMoveSpeed     = buffManager != null ? buffManager.GetModifiedMoveSpeed(moveSpeed) : moveSpeed;
+        float modifiedFireCooldown  = buffManager != null ? buffManager.GetModifiedAttackCooldown(1f / fireRate) : (1f / fireRate);
+        float modifiedProjectileSpd = buffManager != null ? buffManager.GetModifiedProjectileSpeed(projectileSpeed) : projectileSpeed;
+        float modifiedRange         = buffManager != null ? buffManager.GetModifiedAttackRange(attackRange) : attackRange;
+
+        HandleMovement(modifiedMoveSpeed);
+
+        Transform target = FindNearestEnemy(modifiedRange);
+
+        if (target != null)
+        {
+            FaceTowards(target.position);
+
+            if (Time.time >= nextFireTime)
+            {
+                Vector3 direction = FlatDirectionTo(target.position);
+                FireProjectile(direction, modifiedProjectileSpd);
+                nextFireTime = Time.time + modifiedFireCooldown;
+            }
+        }
+        else
+        {
+            if (lastMoveDir.sqrMagnitude > 0.0001f)
+            {
+                FaceTowards(transform.position + lastMoveDir);
+            }
+        }
+    }
+
+    void HandleMovement(float modifiedSpeed)
+    {
+        Vector2 input = Vector2.zero;
+
+#if UNITY_EDITOR
+        if (keyboardFallbackInEditor)
+        {
+            input = new Vector2(Input.GetAxisRaw("Horizontal"), Input.GetAxisRaw("Vertical"));
+        }
+#endif
+        if (moveJoystick != null)
+        {
+            Vector2 j = moveJoystick.Direction;
+            if (j.sqrMagnitude > 0.0001f)
+                input = j;
+        }
+
+        Vector3 move = new Vector3(input.x, 0f, input.y);
+        lastMoveDir = move.normalized;
+
+        Vector3 vel = lastMoveDir * modifiedSpeed;
+        rb.linearVelocity = new Vector3(vel.x, rb.linearVelocity.y, vel.z);
+    }
+
+    public void FireProjectile(Vector3 directionFlat, float modifiedProjectileSpd)
+    {
+        if (!projectilePrefab) return;
+
+        Vector3 dir = directionFlat;
+        dir.y = 0f;
+        if (dir.sqrMagnitude < 0.0001f) dir = transform.forward;
+        dir.Normalize();
+
+        Vector3 origin = firePoint ? firePoint.position : (transform.position + Vector3.up * spawnHeight);
+        if (!firePoint) origin.y = Mathf.Max(origin.y, transform.position.y + spawnHeight);
+
+        Vector3 spawn = origin + dir * muzzleOffset;
+        Quaternion rot = Quaternion.LookRotation(dir, Vector3.up);
+
+        GameObject proj = Instantiate(projectilePrefab, spawn, rot);
+
+        int projLayer = LayerMask.NameToLayer(projectileLayerName);
+        if (projLayer >= 0) proj.layer = projLayer;
+
+        Rigidbody projRb = proj.GetComponent<Rigidbody>();
+        if (!projRb) projRb = proj.AddComponent<Rigidbody>();
+        projRb.useGravity = false;
+        projRb.isKinematic = false;
+        projRb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+        projRb.linearVelocity = dir * modifiedProjectileSpd;
+
+        proj.SendMessage("SetOwner", gameObject, SendMessageOptions.DontRequireReceiver);
+        proj.SendMessage("SetDamageSource", DamageSource.AutoAttack, SendMessageOptions.DontRequireReceiver);
+
+        // ✅ Track this projectile
+        RegisterFiredProjectile(proj.GetComponent<Projectile>());
+
+        if (PlayerEvents.Instance != null)
+            PlayerEvents.Instance.InvokeAttack();
+    }
+
+    public void FireProjectileSilent(Vector3 directionFlat, float modifiedProjectileSpd)
+    {
+        if (!projectilePrefab) return;
+
+        Vector3 dir = directionFlat;
+        dir.y = 0f;
+        if (dir.sqrMagnitude < 0.0001f) dir = transform.forward;
+        dir.Normalize();
+
+        Vector3 origin = firePoint ? firePoint.position : (transform.position + Vector3.up * spawnHeight);
+        if (!firePoint) origin.y = Mathf.Max(origin.y, transform.position.y + spawnHeight);
+
+        Vector3 spawn = origin + dir * muzzleOffset;
+        Quaternion rot = Quaternion.LookRotation(dir, Vector3.up);
+
+        GameObject proj = Instantiate(projectilePrefab, spawn, rot);
+
+        int projLayer = LayerMask.NameToLayer(projectileLayerName);
+        if (projLayer >= 0) proj.layer = projLayer;
+
+        Rigidbody projRb = proj.GetComponent<Rigidbody>();
+        if (!projRb) projRb = proj.AddComponent<Rigidbody>();
+        projRb.useGravity = false;
+        projRb.isKinematic = false;
+        projRb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+        projRb.linearVelocity = dir * modifiedProjectileSpd;
+
+        proj.SendMessage("SetOwner", gameObject, SendMessageOptions.DontRequireReceiver);
+        proj.SendMessage("SetDamageSource", DamageSource.AutoAttack, SendMessageOptions.DontRequireReceiver);
+
+        // ✅ Track this projectile as well
+        RegisterFiredProjectile(proj.GetComponent<Projectile>());
+    }
+
+    void FaceTowards(Vector3 worldPoint)
+    {
+        Vector3 dir = (worldPoint - transform.position);
+        dir.y = 0f;
+        if (dir.sqrMagnitude < 0.0001f) return;
+
+        Quaternion targetRot = Quaternion.LookRotation(dir.normalized, Vector3.up);
+        transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, rotateSpeed * Time.deltaTime);
+    }
+
+    Vector3 FlatDirectionTo(Vector3 worldPoint)
+    {
+        Vector3 dir = worldPoint - transform.position;
+        dir.y = 0f;
+        return dir.sqrMagnitude > 0.0001f ? dir.normalized : transform.forward;
+    }
+
+    Transform FindNearestEnemy(float maxRange)
+    {
+        GameObject[] enemies = GameObject.FindGameObjectsWithTag("Enemy");
+        Transform nearest = null;
+        float minSqr = maxRange <= 0f ? float.MaxValue : maxRange * maxRange;
+
+        foreach (GameObject enemy in enemies)
+        {
+            if (!enemy) continue;
+            float sqr = (enemy.transform.position - transform.position).sqrMagnitude;
+            if (sqr < minSqr)
+            {
+                minSqr = sqr;
+                nearest = enemy.transform;
+            }
+        }
+        return nearest;
+    }
+
+    // ✅ Wrapper so external scripts can safely call it
+    public Transform GetNearestEnemy(float maxRange)
+    {
+        return FindNearestEnemy(maxRange);
+    }
+
+    // ✅ Stat accessors
+    public float GetAttackRange() => attackRange;
+
+    public void SetMoveSpeed(float speed) => moveSpeed = speed;
+    public void SetFireRate(float newRate) => fireRate = newRate;
+    public void SetProjectileSpeed(float newSpeed) => projectileSpeed = newSpeed;
+    public void SetAttackRange(float newRange) => attackRange = newRange;
+
+    public void ReduceAttackCooldown(float percent)
+    {
+        if (percent <= 0f || percent >= 1f) return;
+
+        float remaining = Mathf.Max(0f, nextFireTime - Time.time);
+        float reduction = remaining * percent;
+        nextFireTime -= reduction;
+
+        Debug.Log($"[PlayerController] Reduced cooldown by {percent * 100f}% ({reduction:0.00}s).");
+    }
+}
